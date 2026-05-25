@@ -1,17 +1,16 @@
 """
 llm-anonymizer — privacy-preserving text transformer.
 
-POST /anonymize   → replaces sensitive entities with tokens, returns mapping
-POST /deanonymize → restores tokens to original values (pure string substitution)
+POST /anonymize   → replaces PII with semantically similar fakes, returns mapping
+POST /deanonymize → restores originals via string substitution (no LLM needed)
 
-The anonymization step uses a local LLM (llama.cpp) to extract entities.
-Deanonymization needs no LLM — it's a deterministic string replacement.
+Uses Ollama running Anonymizer-1.7B (eternisai, Qwen3-based tool-calling fine-tune).
+The model outputs a replace_entities tool call with {original, replacement} pairs.
 """
 
 import os
 import json
 import logging
-import re
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -22,32 +21,45 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(title="llm-anonymizer")
 
-LLAMA_BASE = os.environ["LLAMA_BASE_URL"]
+OLLAMA_BASE = os.environ["OLLAMA_BASE_URL"]
+MODEL = os.environ.get("ANONYMIZER_MODEL", "hf.co/gabriellarson/Anonymizer-1.7B-GGUF")
 
-ANONYMIZE_PROMPT = """You are a data anonymization engine. Extract all sensitive entities from the text and replace them with placeholder tokens.
+SYSTEM_PROMPT = """You are an anonymizer. Your task is to identify and replace personally identifiable information (PII) in the given text.
+Replace PII entities with semantically equivalent alternatives that preserve the context needed for a good response.
+If no PII is found or replacement is not needed, return an empty replacements list.
 
-Entity types to detect and their token prefixes:
-- People's names → [PERSON_N]
-- Company / organization names → [ORG_N]
-- Project / product names → [PROJECT_N]
-- Email addresses → [EMAIL_N]
-- IP addresses → [IP_N]
-- Hostnames / URLs (excluding generic public ones like github.com) → [HOST_N]
-- Credentials, tokens, API keys → [CRED_N]
-- Phone numbers → [PHONE_N]
-- Physical addresses → [ADDR_N]
+REPLACEMENT RULES:
+• Personal names: Replace private or small-group individuals. Pick same culture + gender + era. DO NOT replace globally recognised public figures.
+• Companies / organisations: Replace private, niche, employer & partner orgs. Invent a fictitious org in the same industry & size tier. Keep major public companies.
+• Projects / codenames / internal tools: Always replace with a neutral two-word alias of similar length.
+• Locations: Replace street addresses, buildings, small towns. Keep big cities (≥ 1M), states, countries, iconic landmarks.
+• Identifiers (emails, phone #s, IDs, URLs, account #s): Always replace with format-valid dummies.
+• Credentials, tokens, API keys: Replace with realistic-looking fakes of the same format."""
 
-Rules:
-- N starts at 1 for each type and increments per unique value
-- Use the same token for repeated occurrences of the same entity
-- Keep all other text exactly as-is
-- Respond ONLY with valid JSON, no explanation, no markdown
-
-Output format:
-{"anonymized": "<text with tokens>", "mapping": {"[PERSON_1]": "John Smith", ...}}
-
-Text to anonymize:
-"""
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "replace_entities",
+        "description": "Replace PII entities with anonymized versions",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "replacements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "original": {"type": "string"},
+                            "replacement": {"type": "string"},
+                        },
+                        "required": ["original", "replacement"],
+                    },
+                }
+            },
+            "required": ["replacements"],
+        },
+    },
+}]
 
 
 class AnonymizeRequest(BaseModel):
@@ -75,45 +87,55 @@ async def anonymize(req: AnonymizeRequest):
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
-            f"{LLAMA_BASE}/chat/completions",
+            f"{OLLAMA_BASE}/api/chat",
             json={
-                "model": "local",
+                "model": MODEL,
                 "messages": [
-                    {"role": "user", "content": ANONYMIZE_PROMPT + req.text[:4000]},
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": req.text[:4000] + "\n/no_think"},
                 ],
-                "max_tokens": 1024,
-                "temperature": 0,
+                "tools": TOOLS,
                 "stream": False,
             },
-            headers={"Authorization": "Bearer sk-no-key"},
         )
         resp.raise_for_status()
 
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-    log.info("raw anonymizer output: %s", raw[:200])
+    body = resp.json()
+    message = body.get("message", {})
+    tool_calls = message.get("tool_calls", [])
 
-    # Strip markdown code fences if the model wraps its output
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
+    if not tool_calls:
+        # Model found no PII — return text unchanged
+        log.info("no PII detected")
+        return AnonymizeResponse(anonymized=req.text, mapping={})
 
-    try:
-        parsed = json.loads(raw)
-        anonymized = parsed["anonymized"]
-        mapping = parsed.get("mapping", {})
-    except (json.JSONDecodeError, KeyError) as exc:
-        log.error("failed to parse anonymizer output: %s — %s", exc, raw[:300])
-        raise HTTPException(status_code=502, detail=f"Anonymizer returned unparseable output: {exc}")
+    arguments = tool_calls[0].get("function", {}).get("arguments", {})
+    # Ollama native API returns arguments as a dict already (not a JSON string)
+    if isinstance(arguments, str):
+        arguments = json.loads(arguments)
 
-    log.info("anonymized %d entities", len(mapping))
+    replacements = arguments.get("replacements", [])
+    log.info("replacing %d entities", len(replacements))
+
+    anonymized = req.text
+    # mapping: replacement → original (for deanonymization)
+    mapping: dict[str, str] = {}
+    for pair in replacements:
+        original = pair.get("original", "")
+        replacement = pair.get("replacement", "")
+        if original and replacement and original != replacement:
+            anonymized = anonymized.replace(original, replacement)
+            mapping[replacement] = original
+
     return AnonymizeResponse(anonymized=anonymized, mapping=mapping)
 
 
 @app.post("/deanonymize", response_model=DeanonymizeResponse)
 async def deanonymize(req: DeanonymizeRequest):
     text = req.text
-    # Sort by token length descending to avoid partial replacements
-    for token, original in sorted(req.mapping.items(), key=lambda x: len(x[0]), reverse=True):
-        text = text.replace(token, original)
+    # Sort by length descending to avoid partial replacements (e.g. "DataSoft LLC" before "DataSoft")
+    for replacement, original in sorted(req.mapping.items(), key=lambda x: len(x[0]), reverse=True):
+        text = text.replace(replacement, original)
     return DeanonymizeResponse(text=text)
 
 
