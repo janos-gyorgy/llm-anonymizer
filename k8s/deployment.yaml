@@ -1,0 +1,53 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-anonymizer
+  namespace: web-ai-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-anonymizer
+  template:
+    metadata:
+      labels:
+        app: llm-anonymizer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: llm-anonymizer
+          image: ghcr.io/janos-gyorgy/llm-anonymizer:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LLAMA_BASE_URL
+              value: http://llama-server.<your-namespace>.svc:8080/v1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-anonymizer
+  namespace: web-ai-engine
+spec:
+  selector:
+    app: llm-anonymizer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
