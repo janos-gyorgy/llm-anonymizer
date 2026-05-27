@@ -19,9 +19,9 @@
         "method": "POST",
         "url": "http://llm-anonymizer.web-ai-engine.svc:8080/anonymize",
         "sendBody": true,
-        "contentType": "json",
-        "body": "={{ JSON.stringify({ text: $json.body.text }) }}",
-        "options": {}
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.body.text }) }}",
+        "options": { "timeout": 120000 }
       },
       "id": "anonymize",
       "name": "Anonymize",
@@ -34,9 +34,9 @@
         "method": "POST",
         "url": "http://ai-guard.web-ai-engine.svc:8080/v1/chat/completions",
         "sendBody": true,
-        "contentType": "json",
-        "body": "={{ JSON.stringify({\n  model: $json.body.model || 'meta/llama-3.3-70b-instruct',\n  messages: [\n    { role: 'system', content: 'You are a helpful assistant. Answer concisely.' },\n    { role: 'user', content: $('Anonymize').item.json.anonymized }\n  ]\n}) }}",
-        "options": {}
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'meta/llama-3.3-70b-instruct',\n  messages: [\n    { role: 'system', content: 'You are a helpful assistant. Answer concisely.' },\n    { role: 'user', content: $('Anonymize').item.json.anonymized }\n  ]\n}) }}",
+        "options": { "timeout": 120000 }
       },
       "id": "nvidia-nim",
       "name": "NVIDIA NIM",
@@ -49,8 +49,8 @@
         "method": "POST",
         "url": "http://llm-anonymizer.web-ai-engine.svc:8080/deanonymize",
         "sendBody": true,
-        "contentType": "json",
-        "body": "={{ JSON.stringify({\n  text: $json.choices[0].message.content,\n  mapping: $('Anonymize').item.json.mapping\n}) }}",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  text: $json.choices[0].message.content,\n  mapping: $('Anonymize').item.json.mapping\n}) }}",
         "options": {}
       },
       "id": "deanonymize",
@@ -62,7 +62,8 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ result: $json.text }) }}"
+        "responseBody": "={{ JSON.stringify({ result: $json.text }) }}",
+        "options": {}
       },
       "id": "respond",
       "name": "Respond",
