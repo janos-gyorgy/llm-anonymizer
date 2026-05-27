@@ -24,17 +24,15 @@ app = FastAPI(title="llm-anonymizer")
 OLLAMA_BASE = os.environ["OLLAMA_BASE_URL"]
 MODEL = os.environ.get("ANONYMIZER_MODEL", "hf.co/gabriellarson/Anonymizer-1.7B-GGUF")
 
-SYSTEM_PROMPT = """You are an anonymizer. Your task is to identify and replace personally identifiable information (PII) in the given text.
-Replace PII entities with semantically equivalent alternatives that preserve the context needed for a good response.
-If no PII is found or replacement is not needed, return an empty replacements list.
+SYSTEM_PROMPT = """You are an anonymizer. Identify and replace personally identifiable information (PII) in the text.
+Replace each PII entity with a semantically similar but fake alternative that preserves context.
+Always call replace_entities. If there is no PII, return an empty replacements list.
 
-REPLACEMENT RULES:
-• Personal names: Replace private or small-group individuals. Pick same culture + gender + era. DO NOT replace globally recognised public figures.
-• Companies / organisations: Replace private, niche, employer & partner orgs. Invent a fictitious org in the same industry & size tier. Keep major public companies.
-• Projects / codenames / internal tools: Always replace with a neutral two-word alias of similar length.
-• Locations: Replace street addresses, buildings, small towns. Keep big cities (≥ 1M), states, countries, iconic landmarks.
-• Identifiers (emails, phone #s, IDs, URLs, account #s): Always replace with format-valid dummies.
-• Credentials, tokens, API keys: Replace with realistic-looking fakes of the same format."""
+RULES:
+• Names: replace with a different name of the same culture, gender, era.
+• Companies / orgs: invent a fictitious org in the same industry and size.
+• Projects / codenames: replace with a neutral two-word alias.
+• Emails, phone numbers, IDs, keys: replace with format-valid fakes."""
 
 TOOLS = [{
     "type": "function",
@@ -96,6 +94,7 @@ async def anonymize(req: AnonymizeRequest):
                 ],
                 "tools": TOOLS,
                 "stream": False,
+                "options": {"temperature": 0},
             },
         )
         resp.raise_for_status()
